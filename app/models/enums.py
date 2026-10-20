@@ -26,6 +26,17 @@ TYPE_PREFIX: dict[ApprovalType, str] = {
     ApprovalType.ACCOUNT_PROVISIONING: "AC",
 }
 
+# D17-4: title 兜底生成用中文名（{类型中文名}-{提交人id}-{YYYYMMDD}）
+TYPE_CN_NAMES: dict[ApprovalType, str] = {
+    ApprovalType.LEAVE: "请假",
+    ApprovalType.EXPENSE: "报销",
+    ApprovalType.PROCUREMENT: "采购",
+    ApprovalType.CONTRACT: "合同",
+    ApprovalType.PERMISSION: "权限申请",
+    ApprovalType.SERVER_PROVISIONING: "服务器开通",
+    ApprovalType.ACCOUNT_PROVISIONING: "账号申请",
+}
+
 
 class InstanceStatus(str, Enum):
     """审批单状态。APPROVED / REJECTED / WITHDRAWN 为终态，终态不可变（D1）。"""
@@ -72,3 +83,7 @@ class AuditAction(str, Enum):
     SKIP = "SKIP"                            # 自审批回避自动跳过 / 终态作废
     ESCALATE_URGENT = "ESCALATE_URGENT"
     TIMEOUT_REMIND = "TIMEOUT_REMIND"
+    # D18: 飞书终态弹窗渠道审计（渠道未配置时不产生任何 FEISHU_* 记录）
+    FEISHU_SENT = "FEISHU_SENT"              # 卡片 + 应用内加急发送成功
+    FEISHU_FAILED = "FEISHU_FAILED"          # 发送异常，降级不阻塞终态，不重试
+    FEISHU_SKIPPED = "FEISHU_SKIPPED"        # 提交人无 open_id 映射等原因跳过
