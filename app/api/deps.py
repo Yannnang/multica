@@ -15,6 +15,7 @@ ActorHeader = Annotated[
         alias="X-User-Id",
         min_length=1,
         max_length=64,
+        pattern=r"\S",  # D10 澄清：至少一个非空白字符——空白头契约层即 422
         description="操作人用户 ID（v1 鉴权，D10）",
     ),
 ]

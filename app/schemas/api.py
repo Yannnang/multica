@@ -92,9 +92,9 @@ class ApproveRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
-    """驳回。意见必填（D4）：缺失/空白 → 422。version = 任务当前值。"""
+    """驳回。意见必填（D4）：缺失/空白（strip 后为空）→ 422。version = 任务当前值。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     comment: str = Field(min_length=1, max_length=2000)
     version: int = Field(ge=0)
