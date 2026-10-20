@@ -96,19 +96,19 @@ def test_a08_missing_required_field_is_422_and_creates_nothing(client, approval_
 # ---------------------------------------------------------------------------
 
 INVALID_VALUE_CASES = [
-    # (type, payload 覆盖, 错误应引用的字段)
+    # (type, payload 覆盖, 错误应引用的字段) — v0.2.0 契约（金额整数分，明细行）
     ("leave", {"end_date": "2026-11-01"}, "end_date"),                      # end < start
-    ("expense", {"amount": "0"}, "amount"),                                   # 非正数
-    ("expense", {"amount": "-5"}, "amount"),
-    ("expense", {"amount": "50000.01"}, "amount"),                            # 超上限 50000
-    ("procurement", {"quantity": 0}, "quantity"),                             # ≥1
-    ("procurement", {"estimated_amount": "10000001"}, "estimated_amount"),    # 超上限
+    ("expense", {"items": [{"name": "taxi", "incurred_on": "2025-12-20", "amount_cents": 0}]}, "amount_cents"),   # 非正数
+    ("expense", {"items": [{"name": "taxi", "incurred_on": "2025-12-20", "amount_cents": -5}]}, "amount_cents"),
+    ("expense", {"items": [{"name": "taxi", "incurred_on": "2025-12-20", "amount_cents": 5000001}]}, "amount"),  # 超上限 5,000,000 分
+    ("procurement", {"items": [{"name": "laptop", "quantity": 0, "unit_price_cents": 750000}]}, "quantity"),     # ≥1
+    ("procurement", {"items": [{"name": "laptop", "quantity": 9999, "unit_price_cents": 100000000}]}, "amount"),  # 超上限 1,000,000,000 分
     ("contract", {"start_date": "2026-05-01", "end_date": "2026-04-01"}, "end_date"),
-    ("contract", {"contract_amount": "0"}, "contract_amount"),
-    ("permission", {"duration_days": 0}, "duration_days"),                    # 1~3650
-    ("permission", {"duration_days": 3651}, "duration_days"),
-    ("server_provisioning", {"cpu_cores": 0}, "cpu_cores"),
-    ("server_provisioning", {"memory_gb": 2049}, "memory_gb"),
+    ("contract", {"contract_amount_cents": 0}, "contract_amount_cents"),     # =0 需 amount_note
+    ("permission", {"duration_days": 0}, "duration_days"),                    # 1~365
+    ("permission", {"duration_days": 366}, "duration_days"),
+    ("server_provisioning", {"cpu_cores": 3}, "cpu_cores"),                   # 枚举档位 {2,4,8,16,32}
+    ("server_provisioning", {"memory_gb": 2049}, "memory_gb"),                # 枚举档位
     ("server_provisioning", {"environment": "uat"}, "environment"),           # 枚举白名单
     ("leave", {"unknown_field": "x"}, "unknown_field"),                       # extra=forbid
 ]
@@ -124,9 +124,10 @@ def test_a09_invalid_values_are_422(client, approval_type, override, bad_field):
 @pytest.mark.parametrize(
     "approval_type,override",
     [
-        ("expense", {"amount": "50000"}),          # 上限含等号 → 合法
-        ("permission", {"duration_days": 3650}),   # 上限含等号 → 合法
-        ("procurement", {"quantity": 1}),          # 下限含等号 → 合法
+        # 上限含等号 → 合法（v0.2.0：金额一律整数分）
+        ("expense", {"items": [{"name": "taxi", "incurred_on": "2025-12-20", "amount_cents": 5000000}]}),
+        ("permission", {"duration_days": 365}),       # 上限含等号 → 合法
+        ("procurement", {"items": [{"name": "laptop", "quantity": 1, "unit_price_cents": 750000}]}),  # 下限含等号 → 合法
     ],
 )
 def test_a09_inclusive_boundaries_are_valid(client, approval_type, override):

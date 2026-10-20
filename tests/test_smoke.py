@@ -40,11 +40,13 @@ def test_openapi_contains_all_contracted_paths(client):
         assert path in paths, f"contract path missing from OpenAPI: {path}"
 
 
-def test_business_endpoint_stub_returns_501_envelope(client, submitter_headers):
+def test_business_endpoints_are_implemented_no_501_stubs(client, submitter_headers):
+    # D12: NOT_IMPLEMENTED 是脚手架期占位，实现完成后消失——合法提交不再返回 501。
+    # 无路由配置 → 422 ROUTING_NOT_CONFIGURED（业务已实现且契约错误封装不变）。
     resp = client.post("/api/v1/instances", json=VALID_LEAVE_BODY, headers=submitter_headers)
-    assert resp.status_code == 501
+    assert resp.status_code == 422
     body = resp.json()
-    assert body["error"]["code"] == "NOT_IMPLEMENTED"
+    assert body["error"]["code"] == "ROUTING_NOT_CONFIGURED"
 
 
 def test_unknown_approval_type_is_422_validation_error(client, submitter_headers):

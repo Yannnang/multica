@@ -28,7 +28,8 @@ PREFIX_BY_TYPE = {
 
 ALL_TYPES = list(PREFIX_BY_TYPE)
 
-# v1 minimal valid payloads (decisions.md 附录 A / app/schemas/payloads.py)
+# v1 minimal valid payloads (decisions.md 附录 A / app/schemas/payloads.py, v0.2.0)
+# FakeClock 起点 2026-01-01：相对日期字段以该日为「今天」构造合法值。
 VALID_PAYLOADS = {
     "leave": {
         "leave_type": "annual",
@@ -38,19 +39,31 @@ VALID_PAYLOADS = {
     },
     "expense": {
         "expense_type": "travel",
-        "amount": "1200.50",
+        "items": [
+            {"name": "taxi", "incurred_on": "2025-12-20", "amount_cents": 120050},
+        ],
         "description": "conference trip",
+        "payee_account": "6222021234567890",
+        "invoice_numbers": ["INV20260001"],
     },
     "procurement": {
-        "item_name": "laptop",
-        "quantity": 2,
-        "estimated_amount": "15000",
+        "item_category": "equipment",
+        "items": [
+            {"name": "laptop", "spec": "ThinkPad T14", "quantity": 2, "unit_price_cents": 750000},
+        ],
+        "supplier": "Lenovo",
+        "expected_delivery_date": "2026-02-01",
         "reason": "team equipment refresh",
     },
     "contract": {
+        "contract_type": "nda",
         "contract_name": "NDA with Acme",
         "counterparty": "Acme Ltd",
-        "contract_amount": "500000",
+        "contract_amount_cents": 50000000,
+        "currency": "CNY",
+        "start_date": "2026-02-01",
+        "end_date": "2027-01-31",
+        "summary": "mutual NDA for partnership talks",
     },
     "permission": {
         "system_name": "wiki",
@@ -59,14 +72,20 @@ VALID_PAYLOADS = {
     },
     "server_provisioning": {
         "environment": "prod",
+        "service_name": "api-gateway",
         "cpu_cores": 8,
         "memory_gb": 16,
         "disk_gb": 200,
+        "os_type": "ubuntu-22.04",
+        "open_ports": [80, 443],
+        "expected_ready_date": "2026-01-15",
         "purpose": "api server",
     },
     "account_provisioning": {
         "system_name": "wiki",
         "account_type": "service",
+        "owner_id": "u-owner-1",
+        "valid_until": "2026-06-30",
         "purpose": "ci bot account",
     },
 }
@@ -74,8 +93,8 @@ VALID_PAYLOADS = {
 # One required field per type, dropped by TC-A08 parametrization
 REQUIRED_FIELD_PER_TYPE = {
     "leave": "leave_type",
-    "expense": "amount",
-    "procurement": "quantity",
+    "expense": "payee_account",
+    "procurement": "item_category",
     "contract": "counterparty",
     "permission": "permission_name",
     "server_provisioning": "memory_gb",
@@ -86,7 +105,7 @@ REQUIRED_FIELD_PER_TYPE = {
 SENTINEL_FIELD_PER_TYPE = {
     "leave": ("leave_type", "annual"),
     "expense": ("expense_type", "travel"),
-    "procurement": ("item_name", "laptop"),
+    "procurement": ("item_category", "equipment"),
     "contract": ("counterparty", "Acme Ltd"),
     "permission": ("permission_name", "editor"),
     "server_provisioning": ("environment", "prod"),
@@ -175,6 +194,9 @@ def submit(client, body: dict | None = None, approval_type: str = "leave",
             "is_urgent": is_urgent,
             "payload": VALID_PAYLOADS[approval_type] if payload is None else payload,
         }
+        if is_urgent:
+            # D17-4: is_urgent=true 时 urgent_reason 必填（5~200）
+            body["urgent_reason"] = "needs immediate handling"
     h = dict(headers or SUBMITTER_H)
     if idem_key is not None:
         h["Idempotency-Key"] = idem_key
