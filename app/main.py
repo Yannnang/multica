@@ -41,14 +41,16 @@ def create_app(
     app.state.db_engine = engine
     app.state.session_factory = make_session_factory(engine)
 
-    # 通知渠道：站内（D14，必开）+ 飞书终态弹窗（D18，凭证/注入才启用）
+    # 通知渠道：站内（D14，必开）+ 飞书终态弹窗（D18，凭证/注入才启用）。
+    # user_map 以 callable 接线到 app.state.feishu_user_map：允许 create_app
+    # 之后重绑 state 上的映射（J 节 build_client 的注入约定）。
     client = feishu_client if feishu_client is not None else FeishuClient.from_env()
     user_map = feishu_user_map if feishu_user_map is not None else load_user_map_from_env()
-    channels: list = [InAppChannel()]
-    if client is not None:
-        channels.append(FeishuTerminalChannel(client, user_map))
     app.state.feishu_client = client
     app.state.feishu_user_map = user_map
+    channels: list = [InAppChannel()]
+    if client is not None:
+        channels.append(FeishuTerminalChannel(client, lambda: app.state.feishu_user_map))
     app.state.notification_dispatcher = NotificationDispatcher(channels)
 
     app.add_exception_handler(ApiError, api_error_handler)

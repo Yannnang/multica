@@ -161,11 +161,20 @@ def build_terminal_card(event: TerminalEvent) -> dict:
 
 
 class FeishuTerminalChannel:
-    """D18 渠道：终态弹窗 = send_card + urgent_app；降级不抛出；每单至多一次。"""
+    """D18 渠道：终态弹窗 = send_card + urgent_app；降级不抛出；每单至多一次。
 
-    def __init__(self, client: FeishuClientProtocol, user_map: dict[str, str]) -> None:
+    user_map 支持 dict 或零参 callable —— create_app 注入的是读取
+    `app.state.feishu_user_map` 的 callable，允许测试（J 节 build_client）在
+    create_app 之后重绑 state 上的映射，调度时总取当前值。
+    """
+
+    def __init__(self, client: FeishuClientProtocol, user_map: dict[str, str] | Any) -> None:
         self._client = client
-        self._user_map = dict(user_map)
+        self._user_map = user_map
+
+    def _resolve_user_map(self) -> dict[str, str]:
+        resolved = self._user_map() if callable(self._user_map) else self._user_map
+        return resolved or {}
 
     def on_notify(self, session: Session, now: datetime, event: Any) -> None:
         # 站内通知矩阵（D14）不经飞书；只有终态事件触发弹窗。
@@ -194,7 +203,7 @@ class FeishuTerminalChannel:
                 )
             )
 
-        open_id = self._user_map.get(event.submitter_id)
+        open_id = self._resolve_user_map().get(event.submitter_id)
         if not open_id:
             _record(AuditAction.FEISHU_SKIPPED, f"NO_OPEN_ID_MAP:{event.submitter_id}")
             return

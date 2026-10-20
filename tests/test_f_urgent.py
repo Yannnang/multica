@@ -20,6 +20,7 @@ from tests.helpers import (
     assert_field_error,
     assert_status,
     audit_log,
+    configure_route,
     escalate,
     get_instance,
     hdr,
@@ -205,6 +206,10 @@ def test_f06_urgent_reason_required_and_bounded(client, extra, _desc):
 
 
 def test_f06_urgent_reason_upper_boundary_valid(client):
+    # D2: 201 需要路由配置——落测时（脚手架 501 阶段）缺配被 501 掩盖，
+    # 实现阶段暴露为 422 ROUTING_NOT_CONFIGURED；补上配置以保持用例意图
+    # （钉 urgent_reason 200 字上边界合法），断言不变。
+    configure_route(client, "leave", APPROVER1)
     body = {
         "type": "leave",
         "is_urgent": True,
