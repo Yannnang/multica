@@ -11,7 +11,7 @@ from app.models.db import Base, make_engine, make_session_factory
 from app.services.feishu import FeishuClient, FeishuTerminalChannel, load_user_map_from_env
 from app.services.notify import InAppChannel, NotificationDispatcher
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 
 
 def create_app(

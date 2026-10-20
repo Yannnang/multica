@@ -1,8 +1,9 @@
 # 审批管理系统 v1 契约决策（decisions.md）
 
-状态：**契约冻结（v0.2.0，已对齐前端表单规格，见 D17）**。本文是测试落测与后端实现的唯一契约来源；OpenAPI（`GET /openapi.json`）与 `app/schemas/` 与本文一致。修订需在本 issue 线程确认后更新本文并递增版本。
+状态：**契约冻结（v0.3.0，新增 D18 飞书终态弹窗渠道；v0.2.0 已对齐前端表单规格，见 D17）**。本文是测试落测与后端实现的唯一契约来源；OpenAPI（`GET /openapi.json`）与 `app/schemas/` 与本文一致。修订需在本 issue 线程确认后更新本文并递增版本。
 
 修订记录：
+- v0.3.0（2026-10-20）：增补 **D18 飞书终态弹窗通知渠道**（NotificationChannel 抽象、FeishuClient 协议与真实实现、FEISHU_* 审计动作、失败降级与终态幂等、env 凭证约定）；D14 审计动作全集与 D16 范围外条目随之更新。
 - v0.2.1（2026-10-20）：吸收 test 落测交付的 6 项契约发现——空白 X-User-Id/空白驳回意见契约层拒绝（D4/D10）、D11 版本携带范围修订（仅 withdraw 带 instance version）、timeout-scan 不递增 task.version（D7）、通知 actor 归属表（D14）、version 初始值实现自选。
 - v0.2.0（2026-10-20）：对齐前端 PR 审查员《7 类审批提交表单字段规格》——金额改整数分、报销/采购改明细行、新增条件必填与全局查重、信封增加 title/urgent_reason；拍板其全部「待确认」项（D17）。
 - v0.1.0（2026-10-20）：初版契约，拍板测试用例清单 v1 的状态机假设与开放项①~⑦（D1~D16）。
@@ -114,7 +115,7 @@ HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身�
 
 通知 `actor_id` 归属（v0.2.1 澄清，采纳 test 落测语义）：`SUBMITTED`/`WITHDRAWN` → 提交人；`REJECTED` → 驳回审批人；`APPROVED` → 终审审批人；`TASK_ASSIGNED` → 不作断言（系统触发）；`TIMEOUT_REMINDER` → 系统（null）。审计 actor 同此表，`SKIP`/`TIMEOUT_REMIND` 为系统（null）。
 
-审计（`AuditAction`，GET /api/v1/instances/{id}/audit 时间升序）：`SUBMIT` / `APPROVE`（含意见）/ `REJECT`（含意见）/ `WITHDRAW`（含原因）/ `SKIP`（自审批回避或终态作废，系统 actor=null）/ `ESCALATE_URGENT` / `TIMEOUT_REMIND`（系统）。每条含 actor、时间戳（注入时钟）、动作、意见；只追加，无更新/删除接口（TC-H02）。
+审计（`AuditAction`，GET /api/v1/instances/{id}/audit 时间升序）：`SUBMIT` / `APPROVE`（含意见）/ `REJECT`（含意见）/ `WITHDRAW`（含原因）/ `SKIP`（自审批回避或终态作废，系统 actor=null）/ `ESCALATE_URGENT` / `TIMEOUT_REMIND`（系统）/ `FEISHU_SENT`、`FEISHU_FAILED`、`FEISHU_SKIPPED`（D18 飞书渠道结果，系统 actor=null；渠道未配置时不产生任何 FEISHU_* 记录）。每条含 actor、时间戳（注入时钟）、动作、意见；只追加，无更新/删除接口（TC-H02）。
 
 ## D15. 时间与测试约定
 
@@ -124,7 +125,7 @@ HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身�
 
 ## D16. v1 范围外
 
-会签/或签（D8）、真实认证与用户管理、负责人停用检测、催办/转办/委托、退回修改续走原单（D5 采用新单）、通知外部渠道（站内通知表即全部）、前端 UI（表单规格由前端 PR 审查员另行产出）、以及 D17-7 列出的前端规格延期项。
+会签/或签（D8）、真实认证与用户管理、负责人停用检测、催办/转办/委托、退回修改续走原单（D5 采用新单）、通知外部渠道**除 D18 飞书终态弹窗外**（中间级/待办/超时提醒仍仅站内通知表）、前端 UI（表单规格由前端 PR 审查员另行产出）、以及 D17-7 列出的前端规格延期项。
 
 ## D17. 前端表单规格对齐（v0.2.0）
 
@@ -165,6 +166,26 @@ HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身�
 **D17-7 延期至 v2 的前端规格项**（v1 契约不含，落测勿覆盖）：真实文件上传与附件校验（v1 以 `receipt_url` / `document_url` 可选字段过渡；病假证明、报价单、合同扫描件附件规则随之延期）、工作日历版 durationDays、系统注册表与 targetSystemCode/roleCode 白名单、contract_number 归档分配、年假余额、按金额阈值路由、departmentId 组织档案。
 
 **相对日期校验的执行层**：`expected_delivery_date ≥ 今天`、`expected_ready_date ≥ 今天+1`、`incurred_on ≤ 今天`、`valid_until ≤ 今天+365` 等依赖注入时钟，由**服务层**在提交时校验（错误仍 422 VALIDATION_ERROR，details 指明字段）；schema 层只做静态约束。测试用 FakeClock 推进后断言。
+
+## D18. 飞书终态弹窗通知渠道（v0.3.0）
+
+「完成所有审批流程后飞书弹窗通知发起人」的契约化（MYIT-6 线程 2026-10-20 追加需求；拆解见 MYIT-12/13/14）。
+
+**D18-1 触发点**：单据到达终态 **APPROVED（终审通过）或 REJECTED（任一级驳回）** → 向**提交人**发送飞书弹窗；**WITHDRAWN 不发**（本人操作，无需弹窗）；中间级通过不发。终态不可变（D1）保证每单终态事件至多发生一次。
+
+**D18-2 弹窗形式**：交互卡片（`send_card`，msg_type=interactive）+ 应用内加急（`urgent_app`，飞书客户端弹窗强提醒）。卡片必含：单据编号、单据类型（中文名 + raw 值）、审批结果；REJECTED 卡片携带**驳回意见全文**（与 D4 站内通知同源）。
+
+**D18-3 渠道抽象**：`NotificationChannel` 协议（`on_notify` / `on_terminal`），经 `NotificationDispatcher` 扇出。站内（in-app，D14）为基础渠道恒开；`FeishuTerminalChannel` 仅订阅终态事件。客户端协议 `FeishuClientProtocol`：`send_card(open_id, card) -> message_id`、`urgent_app(open_id, message_id) -> None`；`create_app(feishu_client=..., feishu_user_map=...)` 可注入（测试用 FakeFeishu，J1~J7）。
+
+**D18-4 真实实现**：`app/services/feishu.py::FeishuClient` —— `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（环境变量，**凭证永不入库、不入日志、不入审计**）→ tenant_access_token（缓存，到期前 60s 自动刷新；缓存 TTL 用进程单调时钟，业务时间戳仍走注入时钟 D15）→ send_card（`POST /open-apis/im/v1/messages?receive_id_type=open_id`）→ urgent_app（`PATCH /open-apis/message/v4/urgent_app/{message_id}`）。所需应用权限：`im:message`、`im:message.urgent_app`。
+
+**D18-5 用户映射**：提交人 → open_id 经 `FEISHU_USER_MAP` 环境变量（JSON 对象 `{"<系统用户id>": "<open_id>"}`）或 `create_app(feishu_user_map=...)` 注入。无映射 → **降级为仅站内通知**，审计 `FEISHU_SKIPPED`（comment=`NO_OPEN_ID_MAP:<user_id>`），不报错。
+
+**D18-6 失败语义**：飞书侧任何异常（网络、限流、token、API code≠0）**不阻塞终态迁移与站内通知、不重试**；结果入审计：成功 `FEISHU_SENT`（comment=message_id）、异常 `FEISHU_FAILED`（comment=异常类名+消息，截断 2000 字符）、跳过 `FEISHU_SKIPPED`。渠道未配置（无凭证且未注入）时渠道整体不挂载，**不产生任何 FEISHU_\* 审计**。
+
+**D18-7 终态幂等**：每单弹窗**至多发送一次**——终态不可变使 API 层无法重复触发；渠道内再以已存在的 `FEISHU_SENT` 审计行做防御性护栏（J7）。
+
+**D18-8 真实发送冒烟**：自动化测试只用 FakeFeishu；真实链路验证脚本 `scripts/feishu_smoke.py <open_id|用户id>` 由凭证到位后使用者执行（无凭证拒绝运行；不打印凭证/token）。
 
 ## 附录 A：7 类审批 payload 字段（v0.2.0，权威定义 = `app/schemas/payloads.py`）
 

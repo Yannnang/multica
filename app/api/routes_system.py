@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1", tags=["system"])
 
 @router.get("/health", summary="健康检查")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "approval-system", "version": "0.2.1"}
+    return {"status": "ok", "service": "approval-system", "version": "0.3.0"}
 
 
 @router.post(
