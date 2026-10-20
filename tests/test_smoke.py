@@ -97,3 +97,130 @@ def test_reject_requires_comment_at_contract_level(client, approver_headers):
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+# ---- v0.2.0 contract additions (D17: frontend form spec reconciliation) ----
+
+
+def test_urgent_without_urgent_reason_is_422(client, submitter_headers):
+    body = dict(VALID_LEAVE_BODY, is_urgent=True)
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_leave_over_3_days_requires_handover_person(client, submitter_headers):
+    body = {
+        "type": "leave",
+        "payload": {
+            "leave_type": "annual",
+            "start_date": "2026-11-02",
+            "end_date": "2026-11-06",  # 5 calendar days > 3
+            "reason": "long trip",
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+
+
+def test_expense_item_amount_must_be_positive_cents(client, submitter_headers):
+    body = {
+        "type": "expense",
+        "payload": {
+            "expense_type": "travel",
+            "items": [{"name": "taxi", "incurred_on": "2026-10-01", "amount_cents": 0}],
+            "description": "october travel expenses",
+            "payee_account": "6222021234567890",
+            "invoice_numbers": ["INV20260001"],
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+
+
+def test_expense_rejects_server_computed_total_field(client, submitter_headers):
+    # D17-3: computed fields are not accepted as input (extra=forbid)
+    body = {
+        "type": "expense",
+        "payload": {
+            "expense_type": "travel",
+            "items": [{"name": "taxi", "incurred_on": "2026-10-01", "amount_cents": 1000}],
+            "description": "october travel expenses",
+            "payee_account": "6222021234567890",
+            "invoice_numbers": ["INV20260001"],
+            "total_amount_cents": 1000,
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+
+
+def test_server_cpu_must_be_enum_tier(client, submitter_headers):
+    body = {
+        "type": "server_provisioning",
+        "payload": {
+            "environment": "prod",
+            "service_name": "api-gateway",
+            "cpu_cores": 3,  # not in {2,4,8,16,32}
+            "memory_gb": 8,
+            "disk_gb": 100,
+            "os_type": "ubuntu-22.04",
+            "expected_ready_date": "2026-11-01",
+            "purpose": "gateway rollout",
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+
+
+def test_server_port_22_requires_network_note(client, submitter_headers):
+    body = {
+        "type": "server_provisioning",
+        "payload": {
+            "environment": "staging",
+            "service_name": "bastion-host",
+            "cpu_cores": 2,
+            "memory_gb": 4,
+            "disk_gb": 75,  # not a multiple of 50 → also invalid; fixed below via note test
+            "os_type": "ubuntu-22.04",
+            "open_ports": [22],
+            "expected_ready_date": "2026-11-01",
+            "purpose": "ssh bastion",
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422  # disk step + missing network_note
+
+    body["payload"]["disk_gb"] = 100
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422  # still missing network_note for port 22
+
+
+def test_account_shared_requires_owner_and_valid_until(client, submitter_headers):
+    body = {
+        "type": "account_provisioning",
+        "payload": {
+            "system_name": "crm",
+            "account_type": "shared",
+            "purpose": "team shared inbox account",
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
+
+
+def test_contract_zero_amount_requires_amount_note(client, submitter_headers):
+    body = {
+        "type": "contract",
+        "payload": {
+            "contract_type": "nda",
+            "contract_name": "framework nda",
+            "counterparty": "Acme Ltd",
+            "contract_amount_cents": 0,
+            "start_date": "2026-11-01",
+            "end_date": "2027-10-31",
+            "summary": "framework NDA without fixed amount",
+        },
+    }
+    resp = client.post("/api/v1/instances", json=body, headers=submitter_headers)
+    assert resp.status_code == 422
