@@ -1,6 +1,10 @@
 # 审批管理系统 v1 契约决策（decisions.md）
 
-状态：**契约冻结（v0.1.0 脚手架）**。本文是测试落测与后端实现的唯一契约来源；OpenAPI（`GET /openapi.json`）与 `app/schemas/` 与本文一致。修订需在本 issue 线程确认后更新本文并递增版本。
+状态：**契约冻结（v0.2.0，已对齐前端表单规格，见 D17）**。本文是测试落测与后端实现的唯一契约来源；OpenAPI（`GET /openapi.json`）与 `app/schemas/` 与本文一致。修订需在本 issue 线程确认后更新本文并递增版本。
+
+修订记录：
+- v0.2.0（2026-10-20）：对齐前端 PR 审查员《7 类审批提交表单字段规格》——金额改整数分、报销/采购改明细行、新增条件必填与全局查重、信封增加 title/urgent_reason；拍板其全部「待确认」项（D17）。
+- v0.1.0（2026-10-20）：初版契约，拍板测试用例清单 v1 的状态机假设与开放项①~⑦（D1~D16）。
 
 对应测试用例清单 v1（test，2026-10-20）中标注的全部开放项（①~⑦）与状态机假设，已由后端逐项拍板如下；报告人如不同意任何决策，回复线程即可覆盖。
 
@@ -83,7 +87,7 @@
 {"error": {"code": "<ERROR_CODE>", "message": "<可读信息>", "details": [{"loc": [...], "msg": "...", "type": "..."}]}}
 ```
 
-错误码全集：`VALIDATION_ERROR` / `ROUTING_NOT_CONFIGURED` / `ROUTING_ALL_SELF` / `NOT_FOUND` / `FORBIDDEN` / `SELF_APPROVAL_FORBIDDEN` / `STATE_CONFLICT` / `VERSION_CONFLICT` / `ALREADY_URGENT` / `NOT_IMPLEMENTED`（脚手架期占位，实现完成后消失）。
+错误码全集：`VALIDATION_ERROR` / `ROUTING_NOT_CONFIGURED` / `ROUTING_ALL_SELF` / `NOT_FOUND` / `FORBIDDEN` / `SELF_APPROVAL_FORBIDDEN` / `STATE_CONFLICT` / `VERSION_CONFLICT` / `ALREADY_URGENT` / `INVOICE_DUPLICATE` / `DUPLICATE_SERVICE_NAME` / `DUPLICATE_ACCOUNT` / `NOT_IMPLEMENTED`（脚手架期占位，实现完成后消失）。
 
 HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身份不允许；404=不存在；409=状态/版本冲突；501=未实现。
 
@@ -116,18 +120,58 @@ HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身�
 
 ## D16. v1 范围外
 
-会签/或签（D8）、真实认证与用户管理、负责人停用检测、催办/转办/委托、退回修改续走原单（D5 采用新单）、通知外部渠道（站内通知表即全部）、前端 UI（表单规格由前端 PR 审查员另行产出）。
+会签/或签（D8）、真实认证与用户管理、负责人停用检测、催办/转办/委托、退回修改续走原单（D5 采用新单）、通知外部渠道（站内通知表即全部）、前端 UI（表单规格由前端 PR 审查员另行产出）、以及 D17-7 列出的前端规格延期项。
 
-## 附录 A：7 类审批 payload 字段（v1 最小集，权威定义 = `app/schemas/payloads.py`）
+## D17. 前端表单规格对齐（v0.2.0）
 
-| 类型 | 字段（* 必填） | 关键校验 |
+前端 PR 审查员规格已采纳为契约输入，按下述规则合入；权威字段定义 = `app/schemas/payloads.py` + 附录 A。
+
+**D17-1 命名与枚举映射**：API 一律 snake_case、枚举值沿用后端既有冻结值（避免破坏已分发的 v0.1.0 落测基线），前端 camelCase 由前端层映射：
+
+| 前端规格 | 后端契约 |
+|---|---|
+| approvalType=`reimbursement` / `purchase` / `server` / `account` | type=`expense` / `procurement` / `server_provisioning` / `account_provisioning`（`leave`/`contract`/`permission` 同名） |
+| applicantId（登录态取） | `X-User-Id` 请求头（D10），不接收 body 传入 |
+| requestId（幂等键） | `Idempotency-Key` 请求头（D9，24h 窗口） |
+| urgency=`normal`/`urgent` | `is_urgent: bool` |
+| envType=`production`/`test` | environment=`prod`/`dev`（`staging` 同名） |
+| expenseType=`entertainment` | 已并入 expense_type 枚举（其余值 travel/office/other 同名，另有 meal/transport/training） |
+
+**D17-2 金额单位**：一律**整数分（int64 cents）**——`items[].amount_cents`、`items[].unit_price_cents`、`contract_amount_cents`。上限：报销单总额 ≤ 5,000,000 分（5 万元）；采购总额 ≤ 1,000,000,000 分；合同 ≤ 10,000,000,000 分。超限 → 422。
+
+**D17-3 服务端计算字段**：`duration_days`（请假，日历日含首尾；工作日历 v2）、`total_amount_cents`（报销 = Σ items、采购 = Σ quantity×unit_price）**不接受入参**（payload extra=forbid，传入即 422）；服务端重算写入存储 payload 并随响应返回。
+
+**D17-4 信封公共层**：`title` 可选（1~100），留空服务端兜底生成 `{类型中文名}-{提交人id}-{YYYYMMDD}`；`urgent_reason` 在 `is_urgent=true` 时必填（5~200），否则 422；departmentId v1 无组织档案，延期。
+
+**D17-5 全局查重（新增 3 个 409 错误码）**：
+- 报销 `invoice_numbers`（8~20 位字母数字，请求内去重 + 全局查重）→ `409 INVOICE_DUPLICATE`；
+- 服务器 `environment + service_name`（regex `^[a-z0-9][a-z0-9-]{1,63}$`）存在非 REJECTED/WITHDRAWN 在途或已通过单 → `409 DUPLICATE_SERVICE_NAME`；
+- 账号：同申请人同 `system_name` 已有非 REJECTED/WITHDRAWN 的 personal 账号单 → `409 DUPLICATE_ACCOUNT`。
+
+**D17-6 校验错误状态码**：统一 **422** + D12 封装（`details[].loc` 即前端规格的 `field`），不采用前端规格建议的 400——与已冻结契约及 FastAPI 惯例一致。
+
+**「待确认」项拍板**（后端决策，报告人可在线程回复覆盖）：
+1. 请假**允许补提**（无 start_date ≥ 今天限制）——病假/紧急事假事后补单是真实场景；
+2. 年假余额校验 v1 **不做**（无余额体系）；
+3. 报销明细 `incurred_on` ≤ 提交日（注入时钟校验），**6 个月时限窗 v1 不做**；单笔总额上限 5 万元，超限 422（**不设特殊审批通道**，v2 再议）；
+4. 采购**按金额分级的动态多级路由 v1 不做**——审批级数仍为按类型静态配置（D2）；金额阈值附件同延期；
+5. 权限 `duration_days` 一律 ≤ 365（不区分管理员级）；shared/service 账号 `valid_until` 必填且 ≤ 今天+365（服务层校验）；personal 可空=长期；
+6. 磁盘采纳 **50 ≤ disk_gb ≤ 10000 且步进 50**；cpu/memory 采纳枚举档位 {2,4,8,16,32} / {4,8,16,32,64,128}。
+
+**D17-7 延期至 v2 的前端规格项**（v1 契约不含，落测勿覆盖）：真实文件上传与附件校验（v1 以 `receipt_url` / `document_url` 可选字段过渡；病假证明、报价单、合同扫描件附件规则随之延期）、工作日历版 durationDays、系统注册表与 targetSystemCode/roleCode 白名单、contract_number 归档分配、年假余额、按金额阈值路由、departmentId 组织档案。
+
+**相对日期校验的执行层**：`expected_delivery_date ≥ 今天`、`expected_ready_date ≥ 今天+1`、`incurred_on ≤ 今天`、`valid_until ≤ 今天+365` 等依赖注入时钟，由**服务层**在提交时校验（错误仍 422 VALIDATION_ERROR，details 指明字段）；schema 层只做静态约束。测试用 FakeClock 推进后断言。
+
+## 附录 A：7 类审批 payload 字段（v0.2.0，权威定义 = `app/schemas/payloads.py`）
+
+公共信封：`{"type": <ApprovalType>, "title": str?, "is_urgent": bool=false, "urgent_reason": str?, "payload": {...}}`；payload 多传未知字段（含服务端计算字段）→ 422（extra=forbid）。`* 必填`，`(条件)` 为条件必填。
+
+| 类型 | 字段 | 关键校验 |
 |---|---|---|
-| leave 请假 | leave_type*、start_date*、end_date*、reason* | end_date ≥ start_date；leave_type ∈ annual/sick/personal/marriage/maternity/bereavement/other |
-| expense 报销 | expense_type*、amount*、description*、occurred_on、receipt_url | 0 < amount ≤ 50000 |
-| procurement 采购 | item_name*、quantity*、estimated_amount*、supplier、reason* | quantity ≥ 1；0 < estimated_amount ≤ 10,000,000 |
-| contract 合同 | contract_name*、counterparty*、contract_amount*、start_date、end_date、summary | 0 < contract_amount ≤ 100,000,000；两日期齐全时 end ≥ start |
-| permission 权限申请 | system_name*、permission_name*、reason*、duration_days | duration_days 空=长期，否则 1~3650 |
-| server_provisioning 服务器开通 | environment*、cpu_cores*、memory_gb*、disk_gb*、purpose* | environment ∈ dev/staging/prod；规格上下限见 schema |
-| account_provisioning 账号申请 | system_name*、account_type*、purpose* | 长度约束见 schema |
-
-公共信封：`{"type": <ApprovalType>, "is_urgent": bool=false, "payload": {...}}`；payload 多传未知字段 → 422（extra=forbid）。前端表单规格产出后如有字段增减，以增量修订记录于本文并同步 schema。
+| leave 请假 | leave_type*、start_date*、end_date*、reason*(5~500)、handover_person(条件) | end ≥ start；跨 3 个日历日以上 handover_person 必填；duration_days 服务端算 |
+| expense 报销 | expense_type*、items*[1~50]{name*、incurred_on*、amount_cents*(>0)}、description*(5~1000)、payee_account*(10~32 位数字)、invoice_numbers*[1~20]（8~20 位字母数字）、receipt_url | 总额=Σ items ≤ 5,000,000 分；发票号请求内去重+全局查重(409) |
+| procurement 采购 | item_category*(equipment/consumable/service/software)、items*[1~50]{name*、spec、quantity*(1~9999)、unit_price_cents*(≥0)}、supplier(2~200)、expected_delivery_date*(≥今天)、reason*(5~500) | 总额=Σ qty×price，0 < 总额 ≤ 1,000,000,000 分 |
+| contract 合同 | contract_type*(sales/procurement/nda/labor/other)、contract_name*、counterparty*(2~200)、contract_amount_cents*(0~10,000,000,000)、amount_note(条件)、currency*(默认 CNY)、start_date*、end_date*、summary*(5~2000)、document_url | end > start；金额=0 时 amount_note 必填 |
+| permission 权限申请 | system_name*、permission_name*、resource_scope(≤500)、reason*(5~500)、duration_days(1~365，空=长期) | — |
+| server_provisioning 服务器开通 | environment*(dev/staging/prod)、service_name*(regex)、cpu_cores*{2,4,8,16,32}、memory_gb*{4,8,16,32,64,128}、disk_gb*(50~10000 步进 50)、os_type*(ubuntu-22.04/centos-7/windows-server-2022)、open_ports[≤20](1~65535 去重)、network_note(条件)、expected_ready_date*(≥今天+1)、purpose*(5~500) | 端口含 22/3389 → network_note 必填；env+service_name 全局查重(409) |
+| account_provisioning 账号申请 | system_name*、account_type*(personal/shared/service)、owner_id(条件)、valid_until(条件)、requested_roles[≤20]、purpose*(5~500) | shared/service → owner_id 与 valid_until 必填（≤今天+365）；personal 账号查重(409) |

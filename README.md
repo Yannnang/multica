@@ -5,8 +5,9 @@
 
 技术栈：**Python 3.11+ / FastAPI / SQLAlchemy 2 / SQLite / pytest**（契约见 `docs/decisions.md`）。
 
-## 当前状态：v0.1.0 脚手架（契约冻结，业务未实现）
+## 当前状态：v0.2.0 脚手架（契约冻结，业务未实现）
 
+- 契约已对齐前端表单规格（`docs/decisions.md` D17）：金额整数分、报销/采购明细行、条件必填、全局查重错误码。
 - 所有业务路由为 stub，统一返回 `501 {"error": {"code": "NOT_IMPLEMENTED", ...}}`。
 - 请求体 / 响应模型 / 错误封装 / 状态枚举已按契约完整定义（`app/schemas/`、`app/core/errors.py`、`app/models/enums.py`），
   输入校验类断言（422 + `VALIDATION_ERROR`）在脚手架阶段即已生效。
