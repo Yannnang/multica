@@ -1,11 +1,12 @@
-"""Task routes — approve/reject a pending task (scaffold stage: 501 stubs)."""
+"""Task routes — approve/reject a pending task."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy.orm import Session
 
-from app.api.deps import ActorHeader
-from app.core.errors import not_implemented
+from app.api.deps import ActorHeader, get_db
 from app.schemas.api import ApproveRequest, InstanceOut, RejectRequest
+from app.services import engine
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -18,17 +19,23 @@ ERROR_RESPONSES = {
 
 
 @router.post("/{task_id}/approve", response_model=InstanceOut, responses=ERROR_RESPONSES, summary="同意（返回更新后的整单）")
-def approve_task(task_id: int, body: ApproveRequest, x_user_id: ActorHeader) -> None:
+def approve_task(task_id: int, body: ApproveRequest, x_user_id: ActorHeader, request: Request, db: Session = Depends(get_db)) -> InstanceOut:
     """检查顺序（D12）：404 → 403（操作人==任务审批人？操作人==单据提交人则 403 SELF_APPROVAL_FORBIDDEN）
     → 409 STATE_CONFLICT（单据终态 / 任务非 PENDING=越级或重复）→ 409 VERSION_CONFLICT。
     通过后：任务 APPROVED（记 comment/acted_at）；有下一级 → 激活（自审批则 SKIP 顺延，D3）+ TASK_ASSIGNED；
     无下一级 → 单据 APPROVED + 通知提交人 APPROVED；审计 APPROVE。version 自增。"""
-    not_implemented()
+    instance = engine.approve_task(
+        db, request.app.state.clock, request.app.state.notification_dispatcher, task_id, body, x_user_id
+    )
+    return InstanceOut.model_validate(instance)
 
 
 @router.post("/{task_id}/reject", response_model=InstanceOut, responses=ERROR_RESPONSES, summary="驳回（意见必填，返回更新后的整单）")
-def reject_task(task_id: int, body: RejectRequest, x_user_id: ActorHeader) -> None:
+def reject_task(task_id: int, body: RejectRequest, x_user_id: ActorHeader, request: Request, db: Session = Depends(get_db)) -> InstanceOut:
     """同 approve 的检查顺序。通过后：任务 REJECTED（comment 必填已由 schema 保证）；
     单据立即 REJECTED；其余未终态任务全部 SKIPPED（TC-C02/C03，已 APPROVED 的历史级保留）；
     通知提交人 REJECTED（含意见，TC-D01）；审计 REJECT。"""
-    not_implemented()
+    instance = engine.reject_task(
+        db, request.app.state.clock, request.app.state.notification_dispatcher, task_id, body, x_user_id
+    )
+    return InstanceOut.model_validate(instance)

@@ -2,12 +2,17 @@
 
 v1 鉴权（D10）：X-User-Id 请求头标识操作人，缺失/空白 → 422 VALIDATION_ERROR。
 无真实认证；权限 = 角色规则（提交人 / 当前级审批人），在各端点契约中定义。
+
+get_db: one Session per request, created from the app-level session factory and
+closed on teardown (uncommitted writes are discarded — failed operations must
+leave no trace, D11).
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Iterator
 
-from fastapi import Header
+from fastapi import Header, Request
+from sqlalchemy.orm import Session
 
 ActorHeader = Annotated[
     str,
@@ -28,3 +33,15 @@ IdempotencyKeyHeader = Annotated[
         description="可选幂等键（D9）：同提交人同键 24h 内重放返回原单",
     ),
 ]
+
+
+def get_db(request: Request) -> Iterator[Session]:
+    session_factory = request.app.state.session_factory
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+DbSession = Annotated[Session, "Depends(get_db) — import from routes"]

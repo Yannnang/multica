@@ -17,7 +17,7 @@ HTTP status semantics (contract, see docs/decisions.md D12):
 - 409 INVOICE_DUPLICATE       expense invoice number already submitted globally (D17-5)
 - 409 DUPLICATE_SERVICE_NAME  same env + service_name already has an in-flight/approved instance (D17-5)
 - 409 DUPLICATE_ACCOUNT       submitter already has an active personal account for the system (D17-5)
-- 501 NOT_IMPLEMENTED         scaffold stage: business endpoint not implemented yet
+- 501 NOT_IMPLEMENTED         scaffold-stage placeholder; retired now that all endpoints are implemented
 """
 from __future__ import annotations
 
@@ -60,11 +60,6 @@ class ApiError(Exception):
         self.code = code
         self.message = message
         self.details = details or []
-
-
-def not_implemented() -> None:
-    """Raise the scaffold-stage 501 for business endpoints."""
-    raise ApiError(501, ErrorCode.NOT_IMPLEMENTED, "endpoint not implemented yet")
 
 
 def _envelope(code: str, message: str, details: list[Any]) -> dict[str, Any]:
