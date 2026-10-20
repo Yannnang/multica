@@ -15,7 +15,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Approval System API",
-        version="0.2.0",
+        version="0.2.1",
         description="审批管理系统后端契约（脚手架阶段：业务端点 501，契约见 docs/decisions.md）",
     )
     app.state.clock = clock or SystemClock()

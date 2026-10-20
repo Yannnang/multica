@@ -3,6 +3,7 @@
 状态：**契约冻结（v0.2.0，已对齐前端表单规格，见 D17）**。本文是测试落测与后端实现的唯一契约来源；OpenAPI（`GET /openapi.json`）与 `app/schemas/` 与本文一致。修订需在本 issue 线程确认后更新本文并递增版本。
 
 修订记录：
+- v0.2.1（2026-10-20）：吸收 test 落测交付的 6 项契约发现——空白 X-User-Id/空白驳回意见契约层拒绝（D4/D10）、D11 版本携带范围修订（仅 withdraw 带 instance version）、timeout-scan 不递增 task.version（D7）、通知 actor 归属表（D14）、version 初始值实现自选。
 - v0.2.0（2026-10-20）：对齐前端 PR 审查员《7 类审批提交表单字段规格》——金额改整数分、报销/采购改明细行、新增条件必填与全局查重、信封增加 title/urgent_reason；拍板其全部「待确认」项（D17）。
 - v0.1.0（2026-10-20）：初版契约，拍板测试用例清单 v1 的状态机假设与开放项①~⑦（D1~D16）。
 
@@ -33,7 +34,7 @@
 
 ## D4. 驳回意见（开放项③）
 
-- **驳回意见必填**：`RejectRequest.comment` 最短 1 字符，缺失/空白 → `422 VALIDATION_ERROR`（TC-D02）。
+- **驳回意见必填**：`RejectRequest.comment` strip 后最短 1 字符，缺失/纯空白 → `422 VALIDATION_ERROR`（TC-D02；`str_strip_whitespace` 已在契约层生效）。
 - 同意意见可选；撤回原因可选。
 - 驳回通知提交人时必须携带意见全文（TC-D01）。
 
@@ -55,6 +56,7 @@
 - 提醒对象：当前 `PENDING` 任务的审批人；产生 `TIMEOUT_REMINDER` 通知 + `TIMEOUT_REMIND` 审计。
 - 实现为**扫描式**：`POST /api/v1/system/timeout-scan` 以 `app.state.clock.now()` 计算，无后台线程/真实定时器；任务离开 `PENDING`（同意/驳回/撤回/跳过）后自然不再提醒（TC-G03）。
 - 超时不改变任何状态（D1）。
+- timeout-scan 仅更新任务的 `reminders_sent` / `last_reminded_at`，**不递增 task.version**（version 只守护审批动作，v0.2.1 澄清）。
 
 ## D8. 会签/或签（开放项⑦）
 
@@ -67,16 +69,16 @@
 
 ## D10. 鉴权与操作人
 
-- v1 以 `X-User-Id` 请求头标识操作人，缺失/空白 → `422 VALIDATION_ERROR`；无密码/token 认证。
+- v1 以 `X-User-Id` 请求头标识操作人，缺失/空白/纯空格 → `422 VALIDATION_ERROR`（契约层 `Header(pattern=r"\S")` 已保证，v0.2.1 澄清）；无密码/token 认证。
 - 角色规则：撤回/中途加急/重提 = 仅提交人（否则 `403 FORBIDDEN`，TC-E03）；approve/reject = 仅该任务当前级审批人（否则 `403 FORBIDDEN`，TC-C06）。
 - 读接口 v1 不做数据范围隔离（任何登录用户可读单据/通知仅返回本人）。
 
 ## D11. 并发与一致性（TC-E04 / TC-I01）
 
-- instance 与 task 各携带整数 `version`（乐观锁），每次成功写操作自增。
-- approve/reject 请求体携带 **task** 的 `version`；withdraw/resubmit/escalate 针对 **instance** 的 `version`。
+- instance 与 task 各携带整数 `version`（乐观锁），每次成功写操作自增。**初始值实现自选（本实现取 0）**；测试从响应读取当前值、只断言相对递增（v0.2.1 澄清）。
+- approve/reject 请求体携带 **task** 的 `version`；withdraw 携带 **instance** 的 `version`。`escalate-urgent` 无请求体、`resubmit` 的 body 为 InstanceCreate——两者**不携带 version**，其竞态由状态检查兜底：终态 → `409 STATE_CONFLICT`、已加急 → `409 ALREADY_URGENT`、原单非 REJECTED → `409 STATE_CONFLICT`（v0.2.1 修订，对齐路由签名）。
 - 版本不匹配 → `409 VERSION_CONFLICT`，状态不变。并发双写恰好一方生效，无中间态泄漏。
-- 请求体缺 `version` → `422 VALIDATION_ERROR`。
+- approve/reject/withdraw 请求体缺 `version` → `422 VALIDATION_ERROR`。
 - 检查顺序（实现必须遵守）：`404 NOT_FOUND` → `403` → `409 STATE_CONFLICT` → `409 VERSION_CONFLICT`。越级操作（任务 `WAITING`）与重复审批（任务已终态）均归入 `STATE_CONFLICT`（TC-C04/C05）。
 
 ## D12. 统一错误封装
@@ -109,6 +111,8 @@ HTTP 语义：422=请求不可接受（字段/类型/路由缺配）；403=身�
 | 超时提醒 | 当前 PENDING 任务审批人 | `TIMEOUT_REMINDER` |
 
 通知内容必含：单据类型、单据编号、动作人（TC-H01）。中间级通过不通知提交人（避免噪音），审批进度经单据详情可见。
+
+通知 `actor_id` 归属（v0.2.1 澄清，采纳 test 落测语义）：`SUBMITTED`/`WITHDRAWN` → 提交人；`REJECTED` → 驳回审批人；`APPROVED` → 终审审批人；`TASK_ASSIGNED` → 不作断言（系统触发）；`TIMEOUT_REMINDER` → 系统（null）。审计 actor 同此表，`SKIP`/`TIMEOUT_REMIND` 为系统（null）。
 
 审计（`AuditAction`，GET /api/v1/instances/{id}/audit 时间升序）：`SUBMIT` / `APPROVE`（含意见）/ `REJECT`（含意见）/ `WITHDRAW`（含原因）/ `SKIP`（自审批回避或终态作废，系统 actor=null）/ `ESCALATE_URGENT` / `TIMEOUT_REMIND`（系统）。每条含 actor、时间戳（注入时钟）、动作、意见；只追加，无更新/删除接口（TC-H02）。
 
