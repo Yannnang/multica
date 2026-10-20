@@ -1,0 +1,50 @@
+# ChatBi 后端基座（S1）：api + SQL Server 平台库
+# 密钥/连接串一律走宿主机环境变量注入（仓库零真实密钥）：
+#   JWT_SIGNING_KEY       必填，>=32 字符，本地自签 HS256 密钥
+#   SA_PASSWORD           必填，SQL Server sa 密码（示例部署；生产换更强凭据管理）
+# 启动：
+#   JWT_SIGNING_KEY=<生成一个随机长串> SA_PASSWORD=<强密码> docker compose up -d --build
+#   curl http://localhost:8080/health
+services:
+  chatbi-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SA_PASSWORD:?SA_PASSWORD environment variable is required}
+    ports:
+      - "1433:1433"
+    volumes:
+      - chatbi-db-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  chatbi-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__PlatformDb: "Server=chatbi-db,1433;Database=ChatBi_Platform;User Id=sa;Password=${SA_PASSWORD:?SA_PASSWORD environment variable is required};TrustServerCertificate=True;Encrypt=True"
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY environment variable is required (>=32 chars)}
+      Jwt__Issuer: chatbi
+      Jwt__Audience: chatbi-web
+      Feishu__UseMock: ${FEISHU_USE_MOCK:-true}
+      Feishu__AppId: ${FEISHU_APP_ID:-}
+      Feishu__AppSecret: ${FEISHU_APP_SECRET:-}
+      Feishu__RedirectUri: ${FEISHU_REDIRECT_URI_DEV:-}
+      Feishu__ScopeList: ${FEISHU_SCOPE_LIST:-}
+      Feishu__AdminUnionId: ${ADMIN_UNION_ID:-}
+      Database__ApplyMigrationsOnStart: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      chatbi-db:
+        condition: service_healthy
+
+volumes:
+  chatbi-db-data:
