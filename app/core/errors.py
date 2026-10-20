@@ -14,6 +14,9 @@ HTTP status semantics (contract, see docs/decisions.md D12):
                               duplicate approval, withdraw by rules, etc.)
 - 409 VERSION_CONFLICT        optimistic-lock version mismatch (concurrent modification)
 - 409 ALREADY_URGENT          instance is already urgent
+- 409 INVOICE_DUPLICATE       expense invoice number already submitted globally (D17-5)
+- 409 DUPLICATE_SERVICE_NAME  same env + service_name already has an in-flight/approved instance (D17-5)
+- 409 DUPLICATE_ACCOUNT       submitter already has an active personal account for the system (D17-5)
 - 501 NOT_IMPLEMENTED         scaffold stage: business endpoint not implemented yet
 """
 from __future__ import annotations
@@ -36,6 +39,9 @@ class ErrorCode(str, Enum):
     STATE_CONFLICT = "STATE_CONFLICT"
     VERSION_CONFLICT = "VERSION_CONFLICT"
     ALREADY_URGENT = "ALREADY_URGENT"
+    INVOICE_DUPLICATE = "INVOICE_DUPLICATE"
+    DUPLICATE_SERVICE_NAME = "DUPLICATE_SERVICE_NAME"
+    DUPLICATE_ACCOUNT = "DUPLICATE_ACCOUNT"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
 

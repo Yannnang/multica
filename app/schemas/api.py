@@ -13,15 +13,27 @@ from app.schemas.payloads import PAYLOAD_SCHEMAS
 class InstanceCreate(BaseModel):
     """POST /api/v1/instances 请求体。
 
-    payload 按 type 交叉校验（PAYLOAD_SCHEMAS），非法 → 422 VALIDATION_ERROR；
-    未知 type → 422（枚举校验）。幂等经可选 Idempotency-Key 请求头（D9）。
+    - payload 按 type 交叉校验（PAYLOAD_SCHEMAS），非法 → 422 VALIDATION_ERROR；
+      未知 type → 422（枚举校验）。
+    - title 可选；留空时服务端按「{类型中文名}-{提交人}-{YYYYMMDD}」兜底生成（D17-4）。
+    - is_urgent=true 时 urgent_reason 必填（5~200 字），缺失/空白 → 422（D17-4）。
+    - applicantId 不经客户端传入：操作人一律取 X-User-Id（D10），防替他人提交。
+    - 幂等经可选 Idempotency-Key 请求头（D9，等价前端规格的 requestId，24h 窗口）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     type: ApprovalType
+    title: str | None = Field(default=None, min_length=1, max_length=100)
     is_urgent: bool = False
+    urgent_reason: str | None = Field(default=None, min_length=5, max_length=200)
     payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _urgent_requires_reason(self) -> "InstanceCreate":
+        if self.is_urgent and not (self.urgent_reason and self.urgent_reason.strip()):
+            raise ValueError("urgent_reason is required when is_urgent is true")
+        return self
 
     @model_validator(mode="after")
     def _validate_payload_by_type(self) -> "InstanceCreate":
