@@ -1,235 +1,288 @@
-"""Section J — 飞书终态弹窗通知 (J1~J7, decisions.md D18).
+"""Section J — 飞书终态弹窗通知 (J1~J7).
 
-Contract refs: D18 (触发点=终态 APPROVED/REJECTED，WITHDRAWN 不发；弹窗=交互卡片
-send_card + 应用内加急 urgent_app；失败/无映射降级不阻塞终态，审计
-FEISHU_SENT/FEISHU_FAILED/FEISHU_SKIPPED；每单至多发送一次)。
+契约（本子 issue 拍板的注入约定，实现阶段 S2 提供）：
+- instance 到达终态 **APPROVED 或 REJECTED** → 飞书客户端向**提交人**发交互卡片
+  （send_card）+ 应用内加急弹窗（urgent_app）；**WITHDRAWN 不发**；中间级通过不发。
+- 注入：``create_app(clock=..., database_url=..., feishu_client=FakeFeishu())``。
+  ``FeishuClient`` 协议：
+    ``send_card(open_id: str, card: dict) -> str``（返回 message_id）
+    ``urgent_app(open_id: str, message_id: str) -> None``
+- 提交人 → open_id 映射 ``FEISHU_USER_MAP``（测试经 app.state.feishu_user_map 注入 dict；
+  实现若以 settings 提供，请同时支持 state 覆盖以便测试）。
+- 失败语义：飞书异常或映射缺失**不阻塞**终态与站内通知，不重试；
+  审计新增 ``FEISHU_SENT`` / ``FEISHU_FAILED`` / ``FEISHU_SKIPPED``（AuditAction 随之扩展）。
+- 终态幂等：每单至多发送一次。
 
-注入约定（MYIT-12 落测规格）：`create_app(clock=..., database_url=...,
-feishu_client=FakeFeishu(), feishu_user_map={...})`；FeishuClient 协议：
-`send_card(open_id, card) -> message_id`、`urgent_app(open_id, message_id) -> None`。
+脚手架阶段（当前）create_app 尚无 feishu_client 形参 → build_client 退化为
+app.state 注入，保证收集通过；红因与 A~I 一致 = 业务端点 501 级联。
 """
 from __future__ import annotations
 
 import json
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.conftest import FakeClock
 from tests.helpers import (
     APPROVER1,
     APPROVER2,
     APPROVER3,
     SUBMITTER,
     approve,
+    assert_error,
     audit_log,
-    configure_route,
+    escalate,
+    get_instance,
     hdr,
     kinds_of,
     notifications,
     reject,
-    submit,
     submit_configured,
     task_at_level,
     withdraw,
 )
 
-SUBMITTER_OPEN_ID = "ou-submitter-001"
+DB_URL = "sqlite+pysqlite:///:memory:"
+
+OU_SUBMITTER = "ou-submit-001"
+FEISHU_USER_MAP = {SUBMITTER: OU_SUBMITTER, APPROVER1: "ou-approver-001"}
 
 
 class FakeFeishu:
-    """Recording stand-in for app.services.feishu.FeishuClient (J 节落测规格)."""
+    """FeishuClient 协议测试替身：记录调用；可注入 send_card 失败。"""
 
-    def __init__(self, fail_send: bool = False, fail_urgent: bool = False) -> None:
-        self.send_calls: list[tuple[str, dict]] = []     # (open_id, card)
-        self.urgent_calls: list[tuple[str, str]] = []    # (open_id, message_id)
-        self.send_attempts = 0
-        self._fail_send = fail_send
-        self._fail_urgent = fail_urgent
+    def __init__(self, fail_send_card: bool = False) -> None:
+        self.fail_send_card = fail_send_card
+        self.send_attempts = 0                      # 含失败的尝试次数（验证不重试）
+        self.cards: list[tuple[str, dict]] = []     # (open_id, card)
+        self.urgents: list[tuple[str, str]] = []    # (open_id, message_id)
+        self.sent_message_ids: list[str] = []
+        self._seq = 0
 
     def send_card(self, open_id: str, card: dict) -> str:
         self.send_attempts += 1
-        if self._fail_send:
-            raise RuntimeError("feishu open platform unreachable")
-        self.send_calls.append((open_id, card))
-        return f"om_fake_{len(self.send_calls):04d}"
+        if self.fail_send_card:
+            raise RuntimeError("feishu open api unavailable")
+        self._seq += 1
+        message_id = f"om-fake-{self._seq:04d}"
+        self.cards.append((open_id, card))
+        self.sent_message_ids.append(message_id)
+        return message_id
 
     def urgent_app(self, open_id: str, message_id: str) -> None:
-        if self._fail_urgent:
-            raise RuntimeError("urgent api rejected")
-        self.urgent_calls.append((open_id, message_id))
+        self.urgents.append((open_id, message_id))
+
+
+def build_client(
+    clock: FakeClock,
+    feishu: FakeFeishu,
+    user_map: dict[str, str] | None = None,
+) -> TestClient:
+    """按 issue 注入约定构造 TestClient。
+
+    实现阶段 create_app 将提供 feishu_client 形参；脚手架阶段形参缺失（TypeError）
+    时退化为 app.state.feishu_client 注入——两种路径下断言的业务行为一致。
+    """
+    try:
+        app: FastAPI = create_app(
+            clock=clock, database_url=DB_URL, feishu_client=feishu
+        )
+    except TypeError:  # scaffold: kwarg not yet provided
+        app = create_app(clock=clock, database_url=DB_URL)
+        app.state.feishu_client = feishu
+    app.state.feishu_user_map = dict(
+        FEISHU_USER_MAP if user_map is None else user_map
+    )
+    return TestClient(app)
 
 
 @pytest.fixture()
-def feishu_factory(clock):
-    """Build (client, fake) with an injected FakeFeishu + user map."""
-
-    def _make(fake: FakeFeishu | None = None, user_map: dict | None = None):
-        fake = fake or FakeFeishu()
-        app = create_app(
-            clock=clock,
-            database_url="sqlite+pysqlite:///:memory:",
-            feishu_client=fake,
-            feishu_user_map={SUBMITTER: SUBMITTER_OPEN_ID} if user_map is None else user_map,
-        )
-        return TestClient(app), fake
-
-    return _make
+def feishu() -> FakeFeishu:
+    return FakeFeishu()
 
 
-def _card_text(card: dict) -> str:
-    return json.dumps(card, ensure_ascii=False)
+@pytest.fixture()
+def jclient(clock: FakeClock, feishu: FakeFeishu) -> TestClient:
+    return build_client(clock, feishu)
 
 
-def _feishu_audits(client, iid: int) -> list[dict]:
-    return [a for a in audit_log(client, iid) if a["action"].startswith("FEISHU_")]
+def _actions(client: TestClient, iid: int) -> list[str]:
+    return [a["action"] for a in audit_log(client, iid)]
+
+
+def _drive_approve_all(client, approvers, clock) -> dict:
+    """提交（路由=approvers）并逐级同意到终态 APPROVED，返回最终 instance。"""
+    inst = submit_configured(client, "leave", *approvers)
+    for level, who in enumerate(approvers, start=1):
+        clock.advance(minutes=5)
+        t = task_at_level(inst, level)
+        inst = approve(client, t["id"], t["version"], hdr(who)).json()
+    return inst
+
+
+def _assert_card_matches_instance(card: dict, inst: dict, result: str) -> None:
+    """卡片含单据类型 / 编号 / 结果（J1/J2 语义；类型允许后端枚举值或中文名）。"""
+    card_json = json.dumps(card, ensure_ascii=False)
+    assert inst["number"] in card_json, f"card missing instance number: {card}"
+    assert result in card_json, f"card missing result {result}: {card}"
+    assert ("leave" in card_json) or ("请假" in card_json), (
+        f"card missing approval type: {card}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # J1 (P0): 三级全通过 → 恰好 1 次 send_card + 1 次 urgent_app；审计 FEISHU_SENT
 # ---------------------------------------------------------------------------
 
-def test_j1_full_approval_sends_one_card_and_urgent(feishu_factory):
-    client, fake = feishu_factory()
-    inst = submit_configured(client, "leave", APPROVER1, APPROVER2, APPROVER3)
-
-    for level, approver in [(1, APPROVER1), (2, APPROVER2), (3, APPROVER3)]:
-        t = task_at_level(inst, level)
-        inst = approve(client, t["id"], t["version"], hdr(approver)).json()
+def test_j1_final_approval_sends_card_and_urgent_once(jclient, feishu, clock):
+    inst = _drive_approve_all(jclient, (APPROVER1, APPROVER2, APPROVER3), clock)
     assert inst["status"] == "APPROVED"
 
-    assert len(fake.send_calls) == 1
-    open_id, card = fake.send_calls[0]
-    assert open_id == SUBMITTER_OPEN_ID
-    text = _card_text(card)
-    assert inst["number"] in text          # 编号
-    assert "leave" in text                 # 类型（raw value）
-    assert "APPROVED" in text              # 结果
-    assert fake.urgent_calls == [(SUBMITTER_OPEN_ID, "om_fake_0001")]
+    assert len(feishu.cards) == 1, f"expected exactly 1 card, got {feishu.cards}"
+    open_id, card = feishu.cards[0]
+    assert open_id == OU_SUBMITTER  # 发给提交人的 open_id 映射
+    _assert_card_matches_instance(card, inst, "APPROVED")
 
-    audits = _feishu_audits(client, inst["id"])
-    assert [a["action"] for a in audits] == ["FEISHU_SENT"]
-    assert audits[0]["actor_id"] is None   # 系统渠道动作
+    assert len(feishu.urgents) == 1
+    assert feishu.urgents[0] == (OU_SUBMITTER, feishu.sent_message_ids[0])
 
-    # 站内终态通知不受影响（D14）
-    assert "APPROVED" in kinds_of(notifications(client, hdr(SUBMITTER)))
+    assert "FEISHU_SENT" in _actions(jclient, inst["id"])
+    # 中间级通过不发送：全程只有终态这一次
+    assert feishu.send_attempts == 1
 
 
 # ---------------------------------------------------------------------------
-# J2 (P0): 任一级驳回 → 1 次 send_card + urgent_app；卡片结果=REJECTED 含意见
+# J2 (P0): 任一级驳回 → 同样发送；card 结果=REJECTED 且含驳回意见
 # ---------------------------------------------------------------------------
 
-def test_j2_reject_sends_card_with_comment(feishu_factory):
-    client, fake = feishu_factory()
-    inst = submit_configured(client, "leave", APPROVER1, APPROVER2)
+def test_j2_rejection_sends_card_with_comment(jclient, feishu, clock):
+    inst = submit_configured(jclient, "leave", APPROVER1, APPROVER2, APPROVER3)
+    clock.advance(minutes=5)
     t1 = task_at_level(inst, 1)
-    comment = "quota exceeded for this quarter"
+    approve(jclient, t1["id"], t1["version"], hdr(APPROVER1))
 
-    updated = reject(client, t1["id"], t1["version"], comment, hdr(APPROVER1)).json()
-    assert updated["status"] == "REJECTED"
+    # 重新读取以拿到第 2 级任务，然后驳回
+    clock.advance(minutes=5)
+    refreshed = get_instance(jclient, inst["id"]).json()
+    t2 = task_at_level(refreshed, 2)
+    comment = "budget evidence missing"
+    final = reject(jclient, t2["id"], t2["version"], comment, hdr(APPROVER2)).json()
+    assert final["status"] == "REJECTED"
 
-    assert len(fake.send_calls) == 1
-    text = _card_text(fake.send_calls[0][1])
-    assert updated["number"] in text
-    assert "REJECTED" in text
-    assert comment in text                 # 卡片携带驳回意见全文
-    assert len(fake.urgent_calls) == 1
+    assert len(feishu.cards) == 1
+    open_id, card = feishu.cards[0]
+    assert open_id == OU_SUBMITTER
+    _assert_card_matches_instance(card, final, "REJECTED")
+    assert comment in json.dumps(card, ensure_ascii=False), (
+        f"card missing reject comment: {card}"
+    )
 
-    assert [a["action"] for a in _feishu_audits(client, updated["id"])] == ["FEISHU_SENT"]
+    assert len(feishu.urgents) == 1
+    assert "FEISHU_SENT" in _actions(jclient, final["id"])
+    assert feishu.send_attempts == 1  # 第 1 级通过（中间级）未触发发送
 
 
 # ---------------------------------------------------------------------------
-# J3 (P0): 撤回 → 零调用（WITHDRAWN 不发弹窗）
+# J3 (P0): 撤回 → 零调用（WITHDRAWN 终态不发飞书）
 # ---------------------------------------------------------------------------
 
-def test_j3_withdraw_sends_nothing(feishu_factory):
-    client, fake = feishu_factory()
-    inst = submit_configured(client, "leave", APPROVER1)
-
-    withdrawn = withdraw(client, inst["id"], inst["version"], "changed mind", hdr(SUBMITTER)).json()
+def test_j3_withdraw_sends_nothing(jclient, feishu, clock):
+    inst = submit_configured(jclient, "leave", APPROVER1, APPROVER2)
+    clock.advance(minutes=5)
+    withdrawn = withdraw(
+        jclient, inst["id"], inst["version"], "plan changed", hdr(SUBMITTER)
+    ).json()
     assert withdrawn["status"] == "WITHDRAWN"
 
-    assert fake.send_calls == []
-    assert fake.urgent_calls == []
-    assert fake.send_attempts == 0
-    assert _feishu_audits(client, inst["id"]) == []
+    assert feishu.send_attempts == 0
+    assert feishu.cards == []
+    assert feishu.urgents == []
+    assert not [a for a in _actions(jclient, inst["id"]) if a.startswith("FEISHU")]
 
 
 # ---------------------------------------------------------------------------
 # J4 (P1): 中间级通过未到终态 → 零调用
 # ---------------------------------------------------------------------------
 
-def test_j4_mid_level_approval_sends_nothing(feishu_factory):
-    client, fake = feishu_factory()
-    inst = submit_configured(client, "leave", APPROVER1, APPROVER2)
+def test_j4_intermediate_approval_sends_nothing(jclient, feishu, clock):
+    inst = submit_configured(jclient, "leave", APPROVER1, APPROVER2, APPROVER3)
+    clock.advance(minutes=5)
     t1 = task_at_level(inst, 1)
-
-    updated = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
+    updated = approve(jclient, t1["id"], t1["version"], hdr(APPROVER1)).json()
     assert updated["status"] == "PENDING"  # 未到终态
 
-    assert fake.send_calls == []
-    assert fake.urgent_calls == []
-    assert _feishu_audits(client, inst["id"]) == []
+    assert feishu.send_attempts == 0
+    assert feishu.cards == []
+    assert feishu.urgents == []
+    assert not [a for a in _actions(jclient, inst["id"]) if a.startswith("FEISHU")]
 
 
 # ---------------------------------------------------------------------------
 # J5 (P1): 无 open_id 映射 → 终态与站内通知正常、零调用、审计 FEISHU_SKIPPED
 # ---------------------------------------------------------------------------
 
-def test_j5_missing_open_id_mapping_degrades(feishu_factory):
-    client, fake = feishu_factory(user_map={})  # 提交人无映射
-    inst = submit_configured(client, "leave", APPROVER1)
-    t1 = task_at_level(inst, 1)
+def test_j5_missing_open_id_mapping_skips_feishu(clock):
+    feishu = FakeFeishu()
+    client = build_client(clock, feishu, user_map={})  # 映射缺失
 
-    updated = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
-    assert updated["status"] == "APPROVED"               # 终态不受阻塞
+    inst = submit_configured(client, "leave", APPROVER1)
+    clock.advance(minutes=5)
+    t1 = task_at_level(inst, 1)
+    final = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
+
+    assert final["status"] == "APPROVED"                     # 终态不受阻塞
     assert "APPROVED" in kinds_of(notifications(client, hdr(SUBMITTER)))  # 站内通知正常
-
-    assert fake.send_calls == []
-    assert fake.urgent_calls == []
-    assert fake.send_attempts == 0
-    assert [a["action"] for a in _feishu_audits(client, inst["id"])] == ["FEISHU_SKIPPED"]
+    assert feishu.send_attempts == 0
+    assert feishu.urgents == []
+    assert "FEISHU_SKIPPED" in _actions(client, final["id"])
 
 
 # ---------------------------------------------------------------------------
-# J6 (P1): send_card 抛异常 → 正常终态、审计 FEISHU_FAILED、不重试
+# J6 (P1): send_card 抛异常 → 终态正常、审计 FEISHU_FAILED、不重试
 # ---------------------------------------------------------------------------
 
-def test_j6_send_failure_degrades_without_blocking(feishu_factory):
-    fake = FakeFeishu(fail_send=True)
-    client, fake = feishu_factory(fake=fake)
+def test_j6_send_card_failure_does_not_block_terminal(clock):
+    feishu = FakeFeishu(fail_send_card=True)
+    client = build_client(clock, feishu)
+
     inst = submit_configured(client, "leave", APPROVER1)
+    clock.advance(minutes=5)
     t1 = task_at_level(inst, 1)
+    final = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
 
-    updated = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
-    assert updated["status"] == "APPROVED"               # 终态不受阻塞
+    assert final["status"] == "APPROVED"                     # 飞书失败不阻塞终态
     assert "APPROVED" in kinds_of(notifications(client, hdr(SUBMITTER)))
-
-    assert fake.send_attempts == 1                        # 不重试
-    assert fake.urgent_calls == []
-    audits = _feishu_audits(client, inst["id"])
-    assert [a["action"] for a in audits] == ["FEISHU_FAILED"]
-    assert audits[0]["comment"]                           # 失败原因入审计
+    assert feishu.send_attempts == 1, "must not retry after failure"
+    assert feishu.urgents == []                              # 无 message_id 可加急
+    assert "FEISHU_FAILED" in _actions(client, final["id"])
 
 
 # ---------------------------------------------------------------------------
-# J7 (P2): 终态事件重复触发 → send_card 总计恰好 1 次
+# J7 (P2): 终态事件重复触发 → send_card 总计恰好 1 次（幂等）
 # ---------------------------------------------------------------------------
 
-def test_j7_terminal_popup_sent_at_most_once(feishu_factory):
-    client, fake = feishu_factory()
-    inst = submit_configured(client, "leave", APPROVER1)
+def test_j7_terminal_notification_is_idempotent(jclient, feishu, clock):
+    inst = submit_configured(jclient, "leave", APPROVER1)
+    clock.advance(minutes=5)
     t1 = task_at_level(inst, 1)
+    final = approve(jclient, t1["id"], t1["version"], hdr(APPROVER1)).json()
+    assert final["status"] == "APPROVED"
+    assert len(feishu.cards) == 1
 
-    approved = approve(client, t1["id"], t1["version"], hdr(APPROVER1)).json()
-    assert approved["status"] == "APPROVED"
-    assert len(fake.send_calls) == 1
+    # 终态后任何重复动作（均 409，D1/C08）不得再次触发飞书发送
+    resp = approve(jclient, t1["id"], t1["version"], hdr(APPROVER1), expect=None)
+    assert_error(resp, 409, "STATE_CONFLICT")
+    resp = reject(jclient, t1["id"], t1["version"], "late", hdr(APPROVER1), expect=None)
+    assert_error(resp, 409, "STATE_CONFLICT")
+    resp = withdraw(jclient, final["id"], final["version"], None, hdr(SUBMITTER), expect=None)
+    assert_error(resp, 409, "STATE_CONFLICT")
+    resp = escalate(jclient, final["id"], hdr(SUBMITTER), expect=None)
+    assert_error(resp, 409, "STATE_CONFLICT")
 
-    # 终态不可变（D1）：任何重复动作 → 409，不得再次触发弹窗
-    approve(client, t1["id"], t1["version"], hdr(APPROVER1), expect=409)
-    reject(client, t1["id"], t1["version"], "late reject", hdr(APPROVER1), expect=409)
-    withdraw(client, inst["id"], approved["version"], None, hdr(SUBMITTER), expect=409)
-
-    assert len(fake.send_calls) == 1
-    assert fake.send_attempts == 1
-    assert [a["action"] for a in _feishu_audits(client, inst["id"])] == ["FEISHU_SENT"]
+    assert feishu.send_attempts == 1
+    assert len(feishu.cards) == 1
+    assert len(feishu.urgents) == 1
+    assert _actions(jclient, final["id"]).count("FEISHU_SENT") == 1

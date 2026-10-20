@@ -1,6 +1,8 @@
 """Shared helpers for the behavioral (red) test suite — P0 + P1 state machine.
 
-Assertions follow docs/decisions.md (D1~D16), the single contract source.
+Assertions follow docs/decisions.md (v0.2.1: D1~D17 + 附录 A), the single
+contract source. Payload shapes match app/schemas/payloads.py (v0.2.x:
+integer cents, itemized expense/procurement, conditional-required fields).
 Helpers assert their own setup steps so a failure names the broken contract
 point (e.g. "setup submit returned 501") instead of cascading KeyErrors.
 
@@ -28,8 +30,13 @@ PREFIX_BY_TYPE = {
 
 ALL_TYPES = list(PREFIX_BY_TYPE)
 
-# v1 minimal valid payloads (decisions.md 附录 A / app/schemas/payloads.py, v0.2.0)
-# FakeClock 起点 2026-01-01：相对日期字段以该日为「今天」构造合法值。
+# v1 minimal valid payloads (decisions.md v0.2.1 附录 A / app/schemas/payloads.py)
+#
+# 日期取值约定（FakeClock 起点 2026-01-01，见 tests/conftest.py）：
+# - expense items.incurred_on ≤ 今天 → 取过去日期（服务层按注入时钟校验，D17）；
+# - procurement expected_delivery_date ≥ 今天、server expected_ready_date ≥ 今天+1
+#   → 取年末远期日期（现有用例最多推进时钟 7 天，不会越过）；
+# - account valid_until ≤ 今天+365 → 取 2026-06-30。
 VALID_PAYLOADS = {
     "leave": {
         "leave_type": "annual",
@@ -44,15 +51,14 @@ VALID_PAYLOADS = {
         ],
         "description": "conference trip",
         "payee_account": "6222021234567890",
-        "invoice_numbers": ["INV20260001"],
+        "invoice_numbers": ["INV20250001"],
     },
     "procurement": {
         "item_category": "equipment",
         "items": [
-            {"name": "laptop", "spec": "ThinkPad T14", "quantity": 2, "unit_price_cents": 750000},
+            {"name": "laptop", "quantity": 2, "unit_price_cents": 750000},
         ],
-        "supplier": "Lenovo",
-        "expected_delivery_date": "2026-02-01",
+        "expected_delivery_date": "2026-12-31",
         "reason": "team equipment refresh",
     },
     "contract": {
@@ -77,9 +83,9 @@ VALID_PAYLOADS = {
         "memory_gb": 16,
         "disk_gb": 200,
         "os_type": "ubuntu-22.04",
-        "open_ports": [80, 443],
-        "expected_ready_date": "2026-01-15",
-        "purpose": "api server",
+        "open_ports": [8080],
+        "expected_ready_date": "2026-12-31",
+        "purpose": "api server rollout",
     },
     "account_provisioning": {
         "system_name": "wiki",
@@ -93,7 +99,7 @@ VALID_PAYLOADS = {
 # One required field per type, dropped by TC-A08 parametrization
 REQUIRED_FIELD_PER_TYPE = {
     "leave": "leave_type",
-    "expense": "payee_account",
+    "expense": "items",
     "procurement": "item_category",
     "contract": "counterparty",
     "permission": "permission_name",
@@ -111,6 +117,9 @@ SENTINEL_FIELD_PER_TYPE = {
     "server_provisioning": ("environment", "prod"),
     "account_provisioning": ("account_type", "service"),
 }
+
+# D17-4: is_urgent=true 时信封 urgent_reason 必填（5~200）。
+DEFAULT_URGENT_REASON = "escalated: production blocking issue"
 
 # ---------- actors (match conftest fixtures) ----------
 
@@ -184,19 +193,28 @@ def configure_route(client, approval_type: str, *approvers: str):
     return put_route(client, approval_type, [[a] for a in approvers])
 
 
+def _make_body(approval_type: str, payload: dict | None, is_urgent: bool,
+               urgent_reason: str | None = None) -> dict:
+    """Envelope builder — D17-4: is_urgent=true 时必须携带合法 urgent_reason。"""
+    body: dict = {
+        "type": approval_type,
+        "is_urgent": is_urgent,
+        "payload": VALID_PAYLOADS[approval_type] if payload is None else payload,
+    }
+    if is_urgent:
+        body["urgent_reason"] = urgent_reason or DEFAULT_URGENT_REASON
+    elif urgent_reason is not None:
+        body["urgent_reason"] = urgent_reason
+    return body
+
+
 def submit(client, body: dict | None = None, approval_type: str = "leave",
            payload: dict | None = None, is_urgent: bool = False,
+           urgent_reason: str | None = None,
            headers: dict | None = None, idem_key: str | None = None,
            expect: int | None = 201):
     if body is None:
-        body = {
-            "type": approval_type,
-            "is_urgent": is_urgent,
-            "payload": VALID_PAYLOADS[approval_type] if payload is None else payload,
-        }
-        if is_urgent:
-            # D17-4: is_urgent=true 时 urgent_reason 必填（5~200）
-            body["urgent_reason"] = "needs immediate handling"
+        body = _make_body(approval_type, payload, is_urgent, urgent_reason)
     h = dict(headers or SUBMITTER_H)
     if idem_key is not None:
         h["Idempotency-Key"] = idem_key
@@ -269,13 +287,11 @@ def escalate(client, iid: int, headers: dict | None = None, expect: int | None =
 
 def resubmit(client, iid: int, body: dict | None = None, approval_type: str = "leave",
              payload: dict | None = None, is_urgent: bool = False,
+             urgent_reason: str | None = None,
              headers: dict | None = None, expect: int | None = 201):
+    # D11 (v0.2.1 修订): resubmit 的 body 即 InstanceCreate，不携带 version。
     if body is None:
-        body = {
-            "type": approval_type,
-            "is_urgent": is_urgent,
-            "payload": VALID_PAYLOADS[approval_type] if payload is None else payload,
-        }
+        body = _make_body(approval_type, payload, is_urgent, urgent_reason)
     resp = client.post(
         f"/api/v1/instances/resubmit/{iid}", json=body, headers=headers or SUBMITTER_H
     )
@@ -322,6 +338,7 @@ def kinds_of(notifs: list) -> list[str]:
 
 def submit_configured(client, approval_type: str = "leave", *approvers: str,
                       is_urgent: bool = False, payload: dict | None = None,
+                      urgent_reason: str | None = None,
                       headers: dict | None = None, idem_key: str | None = None) -> dict:
     """configure_route + submit + assert 201; returns the created instance dict."""
     configure_route(client, approval_type, *approvers)
@@ -330,6 +347,7 @@ def submit_configured(client, approval_type: str = "leave", *approvers: str,
         approval_type=approval_type,
         payload=payload,
         is_urgent=is_urgent,
+        urgent_reason=urgent_reason,
         headers=headers,
         idem_key=idem_key,
     )

@@ -6,14 +6,18 @@ D7 (加急超时阈值 4h，含等号触发), TC-F02 (todo 排序 = 加急优先
 """
 from __future__ import annotations
 
+import pytest
+
 from tests.helpers import (
     APPROVER1,
     APPROVER2,
     APPROVER3,
     OUTSIDER,
     SUBMITTER,
+    VALID_PAYLOADS,
     approve,
     assert_error,
+    assert_field_error,
     assert_status,
     audit_log,
     escalate,
@@ -172,3 +176,41 @@ def test_f05d_escalate_preserves_reminder_count(client, clock):
     assert t1_now["reminders_sent"] == 2  # 计数保留（不重置），累计第 2 次
     assert t1_now["status"] == "PENDING"
     assert t1_now["id"] == t1["id"]
+
+
+# ---------------------------------------------------------------------------
+# TC-F06 (D17-4): 信封加急理由 — is_urgent=true 时 urgent_reason 必填（5~200）
+#   缺失/纯空白/超短/超长 → 422（契约层已生效，绿钉）；
+#   200 字上边界 → 合法（当前红：501 级联）。
+# ---------------------------------------------------------------------------
+
+URGENT_REASON_INVALID_CASES = [
+    ({}, "missing"),                       # is_urgent=true 未带 urgent_reason
+    ({"urgent_reason": "     "}, "blank"),  # 纯空白（≥5 字符）等同缺失
+    ({"urgent_reason": "prod"}, "too-short"),   # 4 字 < 5
+    ({"urgent_reason": "x" * 201}, "too-long"),  # 201 字 > 200
+]
+
+
+@pytest.mark.parametrize("extra,_desc", URGENT_REASON_INVALID_CASES)
+def test_f06_urgent_reason_required_and_bounded(client, extra, _desc):
+    body = {
+        "type": "leave",
+        "is_urgent": True,
+        "payload": VALID_PAYLOADS["leave"],
+        **extra,
+    }
+    resp = submit(client, body=body, expect=None)
+    assert_field_error(resp, "urgent_reason")
+
+
+def test_f06_urgent_reason_upper_boundary_valid(client):
+    body = {
+        "type": "leave",
+        "is_urgent": True,
+        "urgent_reason": "x" * 200,  # 上边界含等号 → 合法
+        "payload": VALID_PAYLOADS["leave"],
+    }
+    resp = submit(client, body=body)
+    assert_status(resp, 201)
+    assert resp.json()["is_urgent"] is True
