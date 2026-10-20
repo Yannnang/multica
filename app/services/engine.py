@@ -285,7 +285,7 @@ def _activate_from(
         return
     # 所有剩余级均自审批回避 → 全链自动通过（正常提交已被 ROUTING_ALL_SELF 拦截，
     # 此处覆盖中途路由快照里剩余级恰好全为提交人的边界）
-    _finalize_approved(session, dispatcher, instance, tasks, actor_id, None, now)
+    _finalize_approved(session, dispatcher, instance, tasks, actor_id, now)
 
 
 def _finalize_approved(
