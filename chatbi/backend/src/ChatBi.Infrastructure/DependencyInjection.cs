@@ -1,6 +1,7 @@
 using ChatBi.Application.Auth;
 using ChatBi.Application.Configuration;
 using ChatBi.Application.DataPermissions;
+using ChatBi.Application.Semantic;
 using ChatBi.Infrastructure.Auth;
 using ChatBi.Infrastructure.Persistence;
 using ChatBi.Infrastructure.Repositories;
@@ -70,6 +71,21 @@ public static class DependencyInjection
         services.AddScoped<IUserAccountRepository, EfUserAccountRepository>();
         services.AddScoped<IDataPermissionRuleReader, EfDataPermissionRuleReader>();
         services.AddScoped<IDataPermissionEvaluator, DataPermissionEvaluator>();
+
+        // ---- 语义层（S2）：仓储 + 用例服务 ----
+        services.AddScoped<IDataSourceStore, EfDataSourceStore>();
+        services.AddScoped<ISemanticTableStore, EfSemanticTableStore>();
+        services.AddScoped<ISemanticColumnStore, EfSemanticColumnStore>();
+        services.AddScoped<IMetricStore, EfMetricStore>();
+        services.AddScoped<ISemanticRelationStore, EfSemanticRelationStore>();
+        services.AddScoped<ISynonymStore, EfSynonymStore>();
+        services.AddScoped<DataSourceService>();
+        services.AddScoped<SemanticTableService>();
+        services.AddScoped<SemanticColumnService>();
+        services.AddScoped<MetricService>();
+        services.AddScoped<SemanticRelationService>();
+        services.AddScoped<SynonymService>();
+
         services.AddScoped<AuthService>();
         services.AddScoped<AdminSeedService>();
 

@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Mvc;
+using ChatBi.Application.Common;
 using ChatBi.Api.Auth;
 using ChatBi.Api.Authorization;
 using ChatBi.Api.ErrorHandling;
@@ -50,6 +52,31 @@ builder.Services.AddChatBiPolicies();
 builder.Services.AddControllers();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
+// ---- 模型绑定失败（缺字段/类型不符/枚举越界）与字段校验统一为 422 SEM_FIELD_INVALID ----
+builder.Services.Configure<ApiBehaviorOptions>(options => options.InvalidModelStateResponseFactory = context =>
+{
+    var detail = context.ModelState.Values
+        .SelectMany(value => value.Errors)
+        .Select(error => string.IsNullOrEmpty(error.ErrorMessage) ? "请求体格式非法。" : error.ErrorMessage)
+        .FirstOrDefault()
+        ?? "请求体格式非法。";
+
+    var problem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+    {
+        Status = StatusCodes.Status422UnprocessableEntity,
+        Title = SemanticErrorCodes.FieldInvalid,
+        Detail = detail,
+        Type = $"https://chatbi.local/errors/{SemanticErrorCodes.FieldInvalid.ToLowerInvariant()}",
+    };
+    problem.Extensions["code"] = SemanticErrorCodes.FieldInvalid;
+
+    return new Microsoft.AspNetCore.Mvc.ObjectResult(problem)
+    {
+        StatusCode = StatusCodes.Status422UnprocessableEntity,
+        ContentTypes = { "application/problem+json" },
+    };
+});
 
 // ---- HealthChecks：/health 含平台库 DB 检查 ----
 var platformDbConnection = builder.Configuration.GetConnectionString(DependencyInjection.PlatformDbConnectionStringName);
