@@ -1,12 +1,14 @@
 using ChatBi.Application.Common;
+using ChatBi.Application.Semantic;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 
 namespace ChatBi.Api.ErrorHandling;
 
 /// <summary>
-/// 全局异常处理：AuthException → 对应 HTTP 状态 + ProblemDetails(code)；
+/// 全局异常处理：AuthException / SemanticException → 对应 HTTP 状态 + ProblemDetails(code)；
 /// 未知异常 → 500 INTERNAL（细节只进服务端日志，不外泄）。
+/// 注意：日志只落错误码与请求路径，不落异常消息里的业务字段（如凭证）。
 /// </summary>
 public class GlobalExceptionHandler : IExceptionHandler
 {
@@ -22,6 +24,7 @@ public class GlobalExceptionHandler : IExceptionHandler
         var (status, code, message) = exception switch
         {
             AuthException authEx => (authEx.HttpStatus, authEx.Code, authEx.Message),
+            SemanticException semanticEx => (semanticEx.HttpStatus, semanticEx.Code, semanticEx.Message),
             _ => (StatusCodes.Status500InternalServerError, "INTERNAL", "服务器内部错误，请稍后重试。"),
         };
 
@@ -31,7 +34,7 @@ public class GlobalExceptionHandler : IExceptionHandler
         }
         else
         {
-            _logger.LogWarning("Auth failure {Code} on {Method} {Path}.", code, httpContext.Request.Method, httpContext.Request.Path);
+            _logger.LogWarning("Request rejected {Code} on {Method} {Path}.", code, httpContext.Request.Method, httpContext.Request.Path);
         }
 
         if (httpContext.Response.HasStarted)

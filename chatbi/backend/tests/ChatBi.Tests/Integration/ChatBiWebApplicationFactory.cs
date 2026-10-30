@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ChatBi.Domain.Security;
 using ChatBi.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
@@ -9,6 +10,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace ChatBi.Tests.Integration;
@@ -69,6 +71,12 @@ public class ChatBiWebApplicationFactory : WebApplicationFactory<Program>
 
     private readonly string _databaseName = $"ChatBi_IT_{Guid.NewGuid():N}";
 
+    static ChatBiWebApplicationFactory()
+    {
+        // EF 的 SQL 计数走全局 DiagnosticListener（AddDbContext 二次注册会被 TryAdd 吞掉，不可用）。
+        System.Diagnostics.DiagnosticListener.AllListeners.Subscribe(SqlCommandCounter.ListenerObserver);
+    }
+
     private static readonly string[] ManagedEnvironmentVariables =
     {
         "JWT_SIGNING_KEY",
@@ -102,6 +110,17 @@ public class ChatBiWebApplicationFactory : WebApplicationFactory<Program>
     public HttpClient CreateNoRedirectClient() =>
         CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
+    /// <summary>
+    /// 测试内 SQL 计数（N+1 断言）：经 EF DiagnosticListener 统计 CommandExecuted 事件。
+    /// 先 <see cref="ResetSqlCommandCount"/>，执行请求，再读取 <see cref="SqlCommandCount"/>。
+    /// </summary>
+    public long SqlCommandCount => SqlCommandCounter.ListenerObserver.Count;
+
+    public void ResetSqlCommandCount() => SqlCommandCounter.ListenerObserver.Reset();
+
+    /// <summary>进程内日志收集器（脱敏抽查）：注册为 ILoggerProvider，捕获全部 ILogger 输出。</summary>
+    public CollectingLogSink LogSink { get; } = new();
+
     /// <summary>直接操作平台库做断言/铺数据（独立连接，不共享请求作用域）。</summary>
     public ChatBiDbContext CreateDbContext()
     {
@@ -117,6 +136,9 @@ public class ChatBiWebApplicationFactory : WebApplicationFactory<Program>
         {
             // 把测试程序集里的 ProbeController 挂进 MVC。
             services.AddControllers().AddApplicationPart(typeof(ProbeController).Assembly);
+
+            // 进程内日志收集（脱敏抽查）。
+            services.AddSingleton<ILoggerProvider>(LogSink);
         });
     }
 
@@ -165,8 +187,81 @@ public class ChatBiWebApplicationFactory : WebApplicationFactory<Program>
     }
 }
 
+/// <summary>
+/// EF SQL 命令计数器：订阅 DiagnosticListener（EF 单一监听器名 "Microsoft.EntityFrameworkCore"），
+/// 统计 CommandExecuted 事件。静态单例挂接 AllListeners，工厂实例只读自己的计数。
+/// </summary>
+public sealed class SqlCommandCounter : IObserver<System.Diagnostics.DiagnosticListener>, IObserver<KeyValuePair<string, object?>>
+{
+    public static readonly SqlCommandCounter ListenerObserver = new();
+
+    private long _count;
+
+    public long Count => Interlocked.Read(ref _count);
+
+    public void Reset() => Interlocked.Exchange(ref _count, 0);
+
+    public void OnNext(System.Diagnostics.DiagnosticListener listener)
+    {
+        if (listener.Name == "Microsoft.EntityFrameworkCore")
+        {
+            listener.Subscribe(this);
+        }
+    }
+
+    public void OnNext(KeyValuePair<string, object?> value)
+    {
+        if (value.Key == "Microsoft.EntityFrameworkCore.Database.Command.CommandExecuted")
+        {
+            Interlocked.Increment(ref _count);
+        }
+    }
+
+    public void OnCompleted()
+    {
+    }
+
+    public void OnError(Exception error)
+    {
+    }
+}
+
 [CollectionDefinition(Name)]
 public class IntegrationCollection : ICollectionFixture<ChatBiWebApplicationFactory>
 {
     public const string Name = "Integration";
+}
+
+/// <summary>进程内 ILogger 输出收集（脱敏抽查：断言敏感值不落日志）。</summary>
+public sealed class CollectingLogSink : ILoggerProvider
+{
+    private readonly ConcurrentQueue<string> _entries = new();
+
+    public IReadOnlyList<string> Snapshot() => _entries.ToArray();
+
+    public bool ContainsSecret(string secret) =>
+        _entries.Any(entry => entry.Contains(secret, StringComparison.Ordinal));
+
+    public ILogger CreateLogger(string categoryName) => new Collector(_entries);
+
+    public void Dispose()
+    {
+    }
+
+    private sealed class Collector : ILogger
+    {
+        private readonly ConcurrentQueue<string> _entries;
+
+        public Collector(ConcurrentQueue<string> entries)
+        {
+            _entries = entries;
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            _entries.Enqueue(formatter(state, exception));
+    }
 }
